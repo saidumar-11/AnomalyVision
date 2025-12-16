@@ -1,0 +1,4 @@
+missing_arm
+missing_leg
+missing_eye
+facial_damage
