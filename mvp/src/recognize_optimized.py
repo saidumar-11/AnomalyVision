@@ -2,67 +2,86 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 from insightface.app import FaceAnalysis
-from sklearn.metrics.pairwise import cosine_similarity
+from scipy.spatial.distance import cosine
 
-# --- Load YOLOv8n (optimized for speed) ---
-yolo_model = YOLO("runs/detect/face_detection/weights/best.pt")
+# -----------------------------
+# Paths
+# -----------------------------
+yolo_model_path = r"D:\AnomalyVision/mvp/yolov8n-face.pt"
+embeddings_file = r"D:\AnomalyVision/mvp/database/embeddings_db.npz"
 
-# --- Load InsightFace ---
-face_app = FaceAnalysis()
-face_app.prepare(ctx_id=0)
+# -----------------------------
+# Load YOLO and InsightFace
+# -----------------------------
+yolo_model = YOLO(yolo_model_path)
+face_app = FaceAnalysis(name="buffalo_l")
+face_app.prepare(ctx_id=0)  # CPU
 
-# --- Load embeddings database ---
-db_file = np.load("embeddings_db.npz", allow_pickle=True)
-embeddings_db = {key: db_file[key] for key in db_file.files}
+# -----------------------------
+# Load embeddings
+# -----------------------------
+data = np.load(embeddings_file, allow_pickle=True)
+embeddings_db = {k: data[k] for k in data.keys()}
 
-# --- Recognition function ---
-def recognize_face(embedding, embeddings_db, threshold=0.5):
-    """
-    embedding: np.array of detected face
-    embeddings_db: dict {person_name: [embeddings]}
-    threshold: cosine similarity threshold
-    """
-    best_person = "Unknown"
-    best_score = -1
-    for person, emb_list in embeddings_db.items():
-        sims = cosine_similarity([embedding], emb_list)
-        sim = sims.max()
-        if sim > best_score and sim > threshold:
-            best_score = sim
-            best_person = person
-    return best_person
-
-# --- Real-time webcam ---
+# -----------------------------
+# Open webcam
+# -----------------------------
 cap = cv2.VideoCapture(0)
-imgsz = 320  # small size for speed
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
 
-    # YOLO detection
-    results = yolo_model.predict(frame, imgsz=imgsz, conf=0.5)
+    results = yolo_model.predict(frame, imgsz=640)
     for box in results[0].boxes.xyxy:
         x1, y1, x2, y2 = box.cpu().numpy().astype(int)
-        face_crop = frame[y1:y2, x1:x2]
 
-        # InsightFace embedding
-        faces = face_app.get(face_crop)
+        # Add padding for better InsightFace detection
+        h, w, _ = frame.shape
+        pad_x = int((x2 - x1) * 0.25)  # 25% padding (increased from 10%)
+        pad_y = int((y2 - y1) * 0.25)
+        
+        x1_p = max(0, x1 - pad_x)
+        y1_p = max(0, y1 - pad_y)
+        x2_p = min(w, x2 + pad_x)
+        y2_p = min(h, y2 + pad_y)
+
+        face_img = frame[y1_p:y2_p, x1_p:x2_p]
+
+        # -----------------------------
+        # Draw bounding box (YOLO) - original box
+        # -----------------------------
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+        faces = face_app.get(face_img)
         if len(faces) == 0:
+            cv2.putText(frame, "No Face (Insight)", (x1, y1 - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             continue
         embedding = faces[0].embedding
 
-        # Recognize person
-        label = recognize_face(embedding, embeddings_db, threshold=0.5)
+        # -----------------------------
+        # Compare embedding with database
+        # -----------------------------
+        min_dist = float("inf")
+        identity = "Unknown"
 
-        # Draw results
-        color = (0, 255, 0) if label != "Unknown" else (0, 0, 255)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-        cv2.putText(frame, label, (x1, y1-10),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 2)
+        for person, emb_array in embeddings_db.items():
+            for db_emb in emb_array:
+                dist = cosine(embedding, db_emb)
+                if dist < min_dist:
+                    min_dist = dist
+                    identity = person
 
-    cv2.imshow("Real-Time Face Recognition", frame)
+        # -----------------------------
+        # Draw Label
+        # -----------------------------
+        label_color = (0, 255, 0) if identity != "Unknown" else (0, 0, 255)
+        cv2.putText(frame, f"{identity} ({min_dist:.2f})", (x1, y1 - 10),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, label_color, 2)
+
+    cv2.imshow("Face Recognition", frame)
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
